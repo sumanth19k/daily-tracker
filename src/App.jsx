@@ -53,6 +53,7 @@ const RECURRING_TASKS = [
 ];
 
 const App = () => {
+  // --- STYLING INJECTION ---
   useEffect(() => {
     if (!document.getElementById('tailwind-cdn')) {
       const script = document.createElement('script');
@@ -62,11 +63,26 @@ const App = () => {
     }
   }, []);
 
+  // --- ROBUST DATE UTILITIES ---
   const getLocalDateString = (dateObj = new Date()) => {
     const year = dateObj.getFullYear();
     const month = String(dateObj.getMonth() + 1).padStart(2, '0');
     const day = String(dateObj.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+  };
+
+  const normalizeIncomingDate = (dateVal) => {
+    if (!dateVal) return "";
+    const dateStr = String(dateVal).split('T')[0].split(' ')[0]; // Extract YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      // Force local interpretation to avoid UTC shift
+      const parts = dateStr.split('-');
+      return `${parts[0]}-${parts[1]}-${parts[2]}`;
+    }
+    try {
+      const d = new Date(dateVal);
+      return isNaN(d.getTime()) ? dateStr : getLocalDateString(d);
+    } catch (e) { return dateStr; }
   };
 
   const todayStr = useMemo(() => getLocalDateString(), []);
@@ -81,20 +97,11 @@ const App = () => {
   const [points, setPoints] = useState(0);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiBriefing, setAiBriefing] = useState("");
+  
   const isTodaySelected = selectedDate === todayStr;
 
-  const normalizeIncomingDate = (dateVal) => {
-    if (!dateVal) return "";
-    if (typeof dateVal === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateVal)) return dateVal;
-    try {
-      const d = new Date(dateVal);
-      if (isNaN(d.getTime())) return String(dateVal).split(' ')[0]; 
-      return getLocalDateString(d);
-    } catch (e) { return String(dateVal).split(' ')[0]; }
-  };
-
   const navigateDate = (days) => {
-    const d = new Date(selectedDate);
+    const d = new Date(selectedDate + "T00:00:00");
     d.setDate(d.getDate() + days);
     setSelectedDate(getLocalDateString(d));
   };
@@ -107,7 +114,9 @@ const App = () => {
     if (!SCRIPT_URL) return;
     try {
       setLoading(true);
+      setError(null);
       const response = await fetch(SCRIPT_URL, { redirect: 'follow' });
+      if (!response.ok) throw new Error("Ledger Access Denied");
       const data = await response.json();
       
       if (data && data.tasks) {
@@ -116,11 +125,16 @@ const App = () => {
           if (t.id) {
             const dateKey = normalizeIncomingDate(t.date);
             const uniqueKey = `${t.id}-${dateKey}`;
-            const normalizedTask = { ...t, date: dateKey };
+            const normalizedTask = { 
+              ...t, 
+              date: dateKey,
+              name: (t.name || "").trim(),
+              category: (t.category || "General").trim()
+            };
             
-            // Cleanup and categorize
-            const nameLower = (t.name || "").toLowerCase().trim();
-            if (nameLower === "nf" || nameLower.includes("zero sugar") || nameLower.includes("wake up") || nameLower.includes("book reading")) {
+            // Clean Behavioral matching
+            const nameL = normalizedTask.name.toLowerCase();
+            if (nameL === "nf" || nameL.includes("zero sugar") || nameL.includes("wake up") || nameL.includes("book reading")) {
               normalizedTask.category = "Behavioral Habits";
             }
             taskMap.set(uniqueKey, normalizedTask);
@@ -132,13 +146,30 @@ const App = () => {
         setPoints(calculatePoints(uniqueList));
       }
     } catch (err) {
-      setError("Database Sync Failed");
+      setError("Database Sync Offline - Using Local Cache");
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  const syncToBackend = async (payload) => {
+    setSyncing(true);
+    try {
+      // Removed no-cors where possible to actually detect failures
+      const response = await fetch(SCRIPT_URL, { 
+        method: 'POST', 
+        body: JSON.stringify(payload)
+      });
+      // Google Apps Script Post usually returns 200 even on some failures, 
+      // but if the network is down this will catch it.
+    } catch (e) {
+      setError("CRITICAL: Save Failed. Check connection.");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const addTask = async (manualTask = null) => {
     if (!isTodaySelected && !manualTask) return;
@@ -156,17 +187,13 @@ const App = () => {
     });
     if (!manualTask) setNewTaskName('');
     
-    setSyncing(true);
-    try {
-      await fetch(SCRIPT_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'add', task: t }) });
-    } catch (e) { setError("Save Failed"); } finally { setSyncing(false); }
+    await syncToBackend({ action: 'add', task: t });
   };
 
   const startProtocol = async () => {
     const dateTasks = tasks.filter(t => t.date === selectedDate);
     const existingNames = dateTasks.map(t => t.name.toLowerCase().trim());
     
-    // Strict comparison to avoid duplicates
     const tasksToAdd = RECURRING_TASKS.filter(rt => !existingNames.includes(rt.name.toLowerCase().trim()));
     if (tasksToAdd.length === 0) return;
 
@@ -188,10 +215,7 @@ const App = () => {
     setTasks(updatedTasks);
     setPoints(calculatePoints(updatedTasks));
 
-    setSyncing(true);
-    try {
-      await fetch(SCRIPT_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: 'toggle', id: taskId, status: newStatus }) });
-    } catch (e) { setError("Toggle Sync Failed"); } finally { setSyncing(false); }
+    await syncToBackend({ action: 'toggle', id: taskId, status: newStatus });
   };
 
   const isProtocolActive = useMemo(() => {
@@ -234,19 +258,21 @@ const App = () => {
       });
       const completed = filtered.filter(t => t.status === 'Completed').length;
       const total = filtered.length;
-      const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
-      return { ...s, percent };
+      return { ...s, percent: total > 0 ? Math.round((completed / total) * 100) : 0 };
     });
 
-    let rank = currentLevel < 2 ? "INITIATE RECRUIT" : currentLevel < 4 ? "DISCIPLINED AGENT" : currentLevel < 7 ? "VANGUARD OPERATIVE" : "ELITE WARRIOR";
+    let rank = "INITIATE RECRUIT";
+    if (currentLevel >= 3) rank = "DISCIPLINED AGENT";
+    if (currentLevel >= 5) rank = "ELITE WARRIOR";
+    if (currentLevel >= 10) rank = "SUPREME COMMANDER";
 
     return { currentLevel, progressXP, streak, last30, rank, categoryConsistency };
   }, [tasks, points]);
 
   if (loading && tasks.length === 0) return (
-    <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white font-sans">
-      <Loader2 className="animate-spin text-blue-500 w-12 h-12 mb-4" />
-      <p className="font-black tracking-widest text-[10px] uppercase italic text-blue-200">Synchronizing OS...</p>
+    <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white font-sans p-10 text-center">
+      <Loader2 className="animate-spin text-blue-500 w-12 h-12 mb-6" />
+      <p className="font-black tracking-[0.2em] text-[10px] uppercase italic text-blue-200">Synchronizing OS Integrity...</p>
     </div>
   );
 
@@ -254,15 +280,16 @@ const App = () => {
     <div className="min-h-screen bg-slate-50 max-w-md mx-auto shadow-2xl pb-32 flex flex-col pt-[env(safe-area-inset-top)] relative font-sans text-slate-900">
       
       {error && (
-        <div className="absolute top-4 left-4 right-4 z-[100] bg-red-600 text-white p-3 flex items-center justify-between shadow-lg animate-in slide-in-from-top duration-300 rounded-2xl">
-          <div className="flex items-center gap-2 px-2">
-            <AlertCircle size={14} />
-            <span className="text-[9px] font-black uppercase tracking-wider">{error}</span>
+        <div className="absolute top-4 left-4 right-4 z-[100] bg-red-600 text-white p-4 flex items-center justify-between shadow-2xl rounded-2xl animate-bounce">
+          <div className="flex items-center gap-3">
+            <AlertCircle size={20} />
+            <span className="text-[10px] font-black uppercase tracking-wider">{error}</span>
           </div>
-          <button onClick={fetchData} className="p-1"><RefreshCcw size={12} /></button>
+          <button onClick={() => {setError(null); fetchData();}} className="bg-white/20 p-2 rounded-lg"><RefreshCcw size={14} /></button>
         </div>
       )}
 
+      {/* Header */}
       <div className="p-6 bg-slate-900 text-white rounded-b-[3.5rem] shadow-2xl border-b border-blue-500/20">
         <div className="flex justify-between items-center mb-6 mt-2">
           <div>
@@ -270,23 +297,24 @@ const App = () => {
             <div className="flex items-center gap-2">
                <div className={`w-1.5 h-1.5 rounded-full ${syncing ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`} />
                <p className="text-slate-400 text-[8px] uppercase tracking-widest font-bold">
-                {isTodaySelected ? 'Live Mission' : 'Archive Data'}
+                {syncing ? 'Syncing Ledger...' : (isTodaySelected ? 'Live Mission' : 'Archive Data')}
                </p>
             </div>
           </div>
           <div className="bg-white/5 px-5 py-2.5 rounded-2xl flex items-center gap-2 border border-white/10 shadow-inner">
-            <Trophy className="text-amber-400 w-4 h-4 shadow-sm" />
+            <Trophy className={`w-4 h-4 ${points > 0 ? 'text-amber-400 fill-amber-400' : 'text-slate-500'}`} />
             <span className="font-black text-amber-400 text-xl tracking-tighter">{points}</span>
           </div>
         </div>
 
+        {/* Date Controller */}
         <div className="bg-white/5 rounded-2xl p-1.5 flex items-center justify-between border border-white/10 mb-2">
-          <button onClick={() => navigateDate(-1)} className="p-2"><ChevronLeft size={20} className="text-blue-400" /></button>
+          <button onClick={() => navigateDate(-1)} className="p-2 hover:bg-white/10 rounded-xl transition-all active:scale-90"><ChevronLeft size={22} className="text-blue-400" /></button>
           <div className="flex items-center gap-2" onClick={() => setSelectedDate(todayStr)}>
             <Calendar size={14} className={isTodaySelected ? "text-blue-400" : "text-slate-400"} />
-            <span className="text-[10px] font-black uppercase text-white">{isTodaySelected ? "Today" : selectedDate}</span>
+            <span className="text-[10px] font-black uppercase text-white tracking-widest">{isTodaySelected ? "Today" : selectedDate}</span>
           </div>
-          <button onClick={() => navigateDate(1)} className="p-2"><ChevronRight size={20} className="text-blue-400" /></button>
+          <button onClick={() => navigateDate(1)} className="p-2 hover:bg-white/10 rounded-xl transition-all active:scale-90"><ChevronRight size={22} className="text-blue-400" /></button>
         </div>
       </div>
 
@@ -296,28 +324,30 @@ const App = () => {
             <button 
               onClick={startProtocol}
               disabled={isProtocolActive || syncing}
-              className={`w-full p-4 rounded-[2rem] flex items-center justify-between shadow-lg transition-all border ${
-                isProtocolActive ? 'bg-slate-100 border-slate-200' : 'bg-slate-900 border-blue-500/30 text-white'
+              className={`w-full p-5 rounded-[2.5rem] flex items-center justify-between shadow-xl transition-all border-2 ${
+                isProtocolActive 
+                ? 'bg-slate-100 border-slate-200 cursor-default grayscale' 
+                : 'bg-slate-900 border-blue-500/30 text-white active:scale-95'
               }`}
             >
               <div className="flex items-center gap-4">
-                <div className={`${isProtocolActive ? 'bg-green-500' : 'bg-blue-600'} p-2.5 rounded-xl`}>
-                  {isProtocolActive ? <ShieldCheck size={18} className="text-white" /> : <Power size={18} className="text-white" />}
+                <div className={`${isProtocolActive ? 'bg-green-500' : 'bg-blue-600'} p-3 rounded-2xl shadow-lg`}>
+                  {isProtocolActive ? <ShieldCheck size={20} className="text-white" /> : <Power size={20} className="text-white" />}
                 </div>
                 <div className="text-left">
-                  <h4 className={`text-[10px] font-black uppercase ${isProtocolActive ? 'text-slate-600' : 'text-white'}`}>
-                    {isProtocolActive ? 'Protocol Active' : 'Initialize Protocol'}
+                  <h4 className={`text-[11px] font-black uppercase tracking-widest ${isProtocolActive ? 'text-slate-600' : 'text-white'}`}>
+                    {isProtocolActive ? 'Protocol Verified' : 'Execute Protocol'}
                   </h4>
-                  <p className="text-[7px] font-bold uppercase text-slate-400">Benchmarks present for this cycle</p>
+                  <p className="text-[7px] font-bold uppercase text-slate-400">Initialize Daily Behavioral Benchmarks</p>
                 </div>
               </div>
-              {!isProtocolActive && <Zap size={14} className="text-amber-400 animate-pulse" />}
+              {!isProtocolActive && <Zap size={16} className="text-amber-400 animate-pulse" />}
             </button>
 
             {!isTodaySelected && (
-              <div className="bg-amber-500/5 border border-amber-500/10 p-4 rounded-[2.2rem] flex items-center gap-4">
-                <Lock size={18} className="text-amber-500" />
-                <p className="text-[8px] font-black uppercase text-amber-700 tracking-widest">Read-Only History Locked</p>
+              <div className="bg-amber-500/10 border-2 border-dashed border-amber-500/20 p-4 rounded-[2.2rem] flex items-center gap-4">
+                <Lock size={20} className="text-amber-600" />
+                <p className="text-[9px] font-black uppercase text-amber-700 tracking-widest leading-tight">Archival Lock: Read Only Mode Active</p>
               </div>
             )}
 
@@ -325,15 +355,15 @@ const App = () => {
               <div className="bg-white p-4 rounded-[2.5rem] border border-slate-200 space-y-4 shadow-sm">
                 <div className="flex items-center gap-2 p-1.5 bg-slate-50 rounded-2xl border border-slate-100">
                   <input 
-                    type="text" placeholder="Identify new target..." className="bg-transparent outline-none flex-1 px-4 py-1 text-sm font-bold"
+                    type="text" placeholder="Identify new target..." className="bg-transparent outline-none flex-1 px-4 py-1 text-sm font-bold placeholder:text-slate-300"
                     value={newTaskName} onChange={(e) => setNewTaskName(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && addTask()}
                   />
-                  <button onClick={() => addTask()} className="bg-slate-900 text-white p-3 rounded-xl active:scale-95 transition-all"><Plus size={18} /></button>
+                  <button onClick={() => addTask()} className="bg-slate-900 text-white p-3 rounded-xl active:scale-90 transition-all shadow-lg"><Plus size={18} strokeWidth={3} /></button>
                 </div>
-                <div className="flex gap-2 overflow-x-auto pb-1">
+                <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
                   {SECTIONS.map(s => (
-                    <button key={s.id} onClick={() => setSelectedCategory(s.id)} className={`flex-shrink-0 px-4 py-2 rounded-xl text-[9px] font-black uppercase ${selectedCategory === s.id ? 'bg-slate-900 text-white shadow-md' : 'bg-slate-100 text-slate-400'}`}>
+                    <button key={s.id} onClick={() => setSelectedCategory(s.id)} className={`flex-shrink-0 px-4 py-2 rounded-xl text-[9px] font-black uppercase transition-all ${selectedCategory === s.id ? 'bg-slate-900 text-white shadow-md' : 'bg-slate-100 text-slate-400'}`}>
                       {s.id.split(' ')[0]}
                     </button>
                   ))}
@@ -347,23 +377,23 @@ const App = () => {
               return (
                 <div key={s.id} className="space-y-4">
                   <div className="flex items-center gap-3 px-1">
-                    <div className={`${s.bg} ${s.color} p-2 rounded-xl`}>{s.icon}</div>
-                    <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">{s.id}</h3>
+                    <div className={`${s.bg} ${s.color} p-2 rounded-xl shadow-inner`}>{s.icon}</div>
+                    <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{s.id}</h3>
                   </div>
                   <div className="space-y-3">
                     {secTasks.map(t => (
                       <div 
                         key={`${t.id}-${t.date}`} 
                         onClick={() => toggleTask(t.id)} 
-                        className={`flex items-center justify-between p-4 rounded-[2rem] border-2 transition-all ${!isTodaySelected ? 'opacity-70 bg-slate-50 border-slate-100 cursor-default' : 'bg-white border-transparent shadow-sm active:scale-98 cursor-pointer'} ${t.status === 'Completed' ? 'opacity-60' : ''}`}
+                        className={`flex items-center justify-between p-5 rounded-[2.2rem] border-2 transition-all ${!isTodaySelected ? 'opacity-60 bg-slate-50 border-slate-100 cursor-default' : 'bg-white border-transparent shadow-md active:scale-98 cursor-pointer'} ${t.status === 'Completed' ? 'opacity-60 border-slate-100' : 'border-white'}`}
                       >
                         <div className="flex items-center gap-4">
-                          <div className={`w-5 h-5 rounded-full flex items-center justify-center ${t.status === 'Completed' ? 'bg-green-500 shadow-md' : 'bg-slate-200'}`}>
-                            {t.status === 'Completed' && <CheckCircle2 className="text-white w-3 h-3" />}
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${t.status === 'Completed' ? 'bg-green-500 shadow-lg shadow-green-200' : 'bg-slate-200 border-2 border-white shadow-inner'}`}>
+                            {t.status === 'Completed' && <CheckCircle2 className="text-white w-4 h-4" />}
                           </div>
-                          <p className={`text-[13px] font-bold leading-tight ${t.status === 'Completed' ? 'line-through text-slate-400' : 'text-slate-800'}`}>{t.name}</p>
+                          <p className={`text-[14px] font-bold leading-tight tracking-tight ${t.status === 'Completed' ? 'line-through text-slate-400' : 'text-slate-800'}`}>{t.name}</p>
                         </div>
-                        <span className={`text-[9px] font-black ${t.status === 'Completed' ? 'text-green-600' : 'text-slate-300'}`}>+{t.points} XP</span>
+                        <span className={`text-[10px] font-black ${t.status === 'Completed' ? 'text-green-600' : 'text-slate-400'}`}>+{t.points} XP</span>
                       </div>
                     ))}
                   </div>
@@ -374,9 +404,9 @@ const App = () => {
         )}
 
         {view === 'stats' && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-right-4">
+          <div className="space-y-8 animate-in fade-in slide-in-from-right-4 pb-10">
             <div className="space-y-4">
-               <h3 className="text-[10px] font-black uppercase text-slate-400 px-1 flex items-center gap-2"><Activity size={14} className="text-blue-500" />Efficiency Matrix</h3>
+               <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-2"><Activity size={14} className="text-blue-500" />Efficiency Matrix</h3>
                {stats.categoryConsistency.map(cat => (
                  <div key={cat.id} className="bg-white p-5 rounded-[2.5rem] shadow-sm border border-slate-100">
                     <div className="flex justify-between items-center mb-3">
@@ -387,57 +417,76 @@ const App = () => {
                        <span className={`text-[11px] font-black ${cat.color}`}>{cat.percent}%</span>
                     </div>
                     <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                       <div className={`h-full transition-all duration-1000 ${cat.color.replace('text', 'bg')}`} style={{ width: `${cat.percent}%` }} />
+                       <div 
+                         className={`h-full transition-all duration-1000 ${cat.color.replace('text', 'bg')}`}
+                         style={{ width: `${cat.percent}%` }}
+                       />
                     </div>
                  </div>
                ))}
             </div>
 
             <div className="bg-white p-6 rounded-[3rem] shadow-sm border border-slate-100 text-slate-900">
-              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-6 flex items-center gap-2"><Calendar size={14} className="text-blue-500" />Heatmap</h3>
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-6 flex items-center gap-2 tracking-widest"><History size={14} className="text-blue-500" />Execution Matrix</h3>
               <div className="grid grid-cols-7 gap-2">
                 {stats.last30.map((d, i) => (
-                  <div key={i} className={`aspect-square rounded-lg transition-all ${d.intensity === 0 ? 'bg-slate-100' : d.intensity === 1 ? 'bg-blue-200' : d.intensity === 2 ? 'bg-blue-400' : d.intensity === 3 ? 'bg-blue-600' : 'bg-blue-900'}`} title={d.date} />
+                  <div key={i} className={`aspect-square rounded-lg transition-all ${d.intensity === 0 ? 'bg-slate-100' : d.intensity === 1 ? 'bg-blue-200' : d.intensity === 2 ? 'bg-blue-400' : d.intensity === 3 ? 'bg-blue-600' : 'bg-blue-900 shadow-sm'}`} title={d.date} />
                 ))}
               </div>
+              <p className="text-[8px] text-slate-400 mt-4 text-center font-bold uppercase tracking-tighter">Activity detected in last 30 intervals</p>
             </div>
           </div>
         )}
 
         {view === 'rank' && (
-          <div className="space-y-6 animate-in slide-in-from-bottom-8">
+          <div className="space-y-6 animate-in slide-in-from-bottom-8 duration-500">
             <div className="bg-slate-900 p-8 rounded-[3.5rem] text-white relative overflow-hidden shadow-2xl border-t border-white/10">
               <Flame className="absolute -right-8 -bottom-8 w-40 h-40 text-blue-500/10 rotate-12" />
-              <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-3">Evolution Protocol</p>
-              <h2 className="text-3xl font-black mb-6 italic tracking-tighter uppercase text-blue-50">{stats.rank}</h2>
-              <div className="h-4 bg-white/5 rounded-full overflow-hidden p-1">
-                <div className="h-full bg-blue-500 rounded-full transition-all duration-1000 shadow-[0_0_15px_rgba(59,130,246,0.5)]" style={{ width: `${(stats.progressXP / 500) * 100}%` }} />
+              <p className="text-[10px] font-black text-blue-400 uppercase tracking-[0.3em] mb-3">Evolution Protocol</p>
+              <h2 className="text-3xl font-black mb-6 italic tracking-tighter uppercase text-blue-50 leading-tight">
+                {stats.rank}
+              </h2>
+              <div className="h-4 bg-white/5 rounded-full overflow-hidden p-1 border border-white/10 shadow-inner">
+                <div 
+                  className="h-full bg-blue-500 rounded-full transition-all duration-1000 shadow-[0_0_20px_rgba(59,130,246,0.6)]" 
+                  style={{ width: `${(stats.progressXP / 500) * 100}%` }} 
+                />
               </div>
-              <div className="flex justify-between mt-5 text-[10px] uppercase font-black">
-                <p className="text-slate-500">LEVEL {stats.currentLevel}</p>
-                <p className="text-blue-400">{500 - stats.progressXP} XP TO ADVANCE</p>
+              <div className="flex justify-between mt-5 text-[10px] uppercase font-black tracking-widest">
+                <p className="text-slate-500">LVL {stats.currentLevel}</p>
+                <p className="text-blue-400">{500 - stats.progressXP} XP TO ASCEND</p>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white p-7 rounded-[2.5rem] text-center border border-slate-100 shadow-sm">
+              <div className="bg-white p-7 rounded-[2.5rem] text-center border border-slate-100 shadow-sm active:scale-95 transition-all">
                 <div className="w-12 h-12 bg-orange-500/10 rounded-2xl flex items-center justify-center mx-auto mb-3"><TrendingUp className="text-orange-500" /></div>
-                <p className="text-3xl font-black text-slate-800">{stats.streak}</p>
+                <p className="text-3xl font-black text-slate-800 tracking-tighter">{stats.streak}</p>
                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Active Streak</p>
               </div>
-              <div className="bg-white p-7 rounded-[2.5rem] text-center border border-slate-100 shadow-sm">
+              <div className="bg-white p-7 rounded-[2.5rem] text-center border border-slate-100 shadow-sm active:scale-95 transition-all">
                 <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center mx-auto mb-3"><Medal className="text-blue-500" /></div>
-                <p className="text-3xl font-black text-slate-800">{points}</p>
-                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Lifetime Score</p>
+                <p className="text-3xl font-black text-slate-800 tracking-tighter">{points}</p>
+                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total Score</p>
               </div>
             </div>
           </div>
         )}
       </div>
 
-      <div className="fixed bottom-10 left-1/2 -translate-x-1/2 w-[90%] max-w-[400px] bg-slate-900/95 backdrop-blur-xl rounded-[3rem] p-4 flex justify-between items-center shadow-[0_30px_60px_-15px_rgba(0,0,0,0.6)] border border-white/10 z-50">
-        <button onClick={() => setView('daily')} className={`flex-1 flex flex-col items-center py-2 transition-all ${view === 'daily' ? 'text-blue-400 scale-125' : 'text-slate-500'}`}><CheckCircle2 size={22} /><span className="text-[8px] font-black uppercase mt-1">Mission</span></button>
-        <button onClick={() => setView('rank')} className={`flex-1 flex flex-col items-center py-2 transition-all ${view === 'rank' ? 'text-blue-400 scale-125' : 'text-slate-500'}`}><Trophy size={22} /><span className="text-[8px] font-black uppercase mt-1">Rank</span></button>
-        <button onClick={() => setView('stats')} className={`flex-1 flex flex-col items-center py-2 transition-all ${view === 'stats' ? 'text-blue-400 scale-125' : 'text-slate-500'}`}><BarChart3 size={22} /><span className="text-[8px] font-black uppercase mt-1">Stats</span></button>
+      {/* Nav Dock */}
+      <div className="fixed bottom-10 left-1/2 -translate-x-1/2 w-[90%] max-w-[400px] bg-slate-900/95 backdrop-blur-3xl rounded-[3rem] p-4 flex justify-between items-center shadow-[0_40px_80px_-15px_rgba(0,0,0,0.8)] border border-white/10 z-50">
+        <button onClick={() => setView('daily')} className={`flex-1 flex flex-col items-center py-2 transition-all duration-300 ${view === 'daily' ? 'text-blue-400 scale-125' : 'text-slate-500'}`}>
+          <CheckCircle2 size={24} strokeWidth={3} />
+          <span className="text-[8px] font-black uppercase mt-1.5 tracking-widest">Mission</span>
+        </button>
+        <button onClick={() => setView('rank')} className={`flex-1 flex flex-col items-center py-2 transition-all duration-300 ${view === 'rank' ? 'text-blue-400 scale-125' : 'text-slate-500'}`}>
+          <Trophy size={24} strokeWidth={3} />
+          <span className="text-[8px] font-black uppercase mt-1.5 tracking-widest">Rank</span>
+        </button>
+        <button onClick={() => setView('stats')} className={`flex-1 flex flex-col items-center py-2 transition-all duration-300 ${view === 'stats' ? 'text-blue-400 scale-125' : 'text-slate-500'}`}>
+          <BarChart3 size={24} strokeWidth={3} />
+          <span className="text-[8px] font-black uppercase mt-1.5 tracking-widest">Stats</span>
+        </button>
       </div>
     </div>
   );
