@@ -75,7 +75,6 @@ const App = () => {
     if (!dateVal) return "";
     const dateStr = String(dateVal).split('T')[0].split(' ')[0]; // Extract YYYY-MM-DD
     if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      // Force local interpretation to avoid UTC shift
       const parts = dateStr.split('-');
       return `${parts[0]}-${parts[1]}-${parts[2]}`;
     }
@@ -132,7 +131,6 @@ const App = () => {
               category: (t.category || "General").trim()
             };
             
-            // Clean Behavioral matching
             const nameL = normalizedTask.name.toLowerCase();
             if (nameL === "nf" || nameL.includes("zero sugar") || nameL.includes("wake up") || nameL.includes("book reading")) {
               normalizedTask.category = "Behavioral Habits";
@@ -157,13 +155,10 @@ const App = () => {
   const syncToBackend = async (payload) => {
     setSyncing(true);
     try {
-      // Removed no-cors where possible to actually detect failures
-      const response = await fetch(SCRIPT_URL, { 
+      await fetch(SCRIPT_URL, { 
         method: 'POST', 
         body: JSON.stringify(payload)
       });
-      // Google Apps Script Post usually returns 200 even on some failures, 
-      // but if the network is down this will catch it.
     } catch (e) {
       setError("CRITICAL: Save Failed. Check connection.");
     } finally {
@@ -326,7 +321,7 @@ const App = () => {
               disabled={isProtocolActive || syncing}
               className={`w-full p-5 rounded-[2.5rem] flex items-center justify-between shadow-xl transition-all border-2 ${
                 isProtocolActive 
-                ? 'bg-slate-100 border-slate-200 cursor-default grayscale' 
+                ? 'bg-green-500/10 border-green-500/20 cursor-default' 
                 : 'bg-slate-900 border-blue-500/30 text-white active:scale-95'
               }`}
             >
@@ -335,10 +330,12 @@ const App = () => {
                   {isProtocolActive ? <ShieldCheck size={20} className="text-white" /> : <Power size={20} className="text-white" />}
                 </div>
                 <div className="text-left">
-                  <h4 className={`text-[11px] font-black uppercase tracking-widest ${isProtocolActive ? 'text-slate-600' : 'text-white'}`}>
+                  <h4 className={`text-[11px] font-black uppercase tracking-widest ${isProtocolActive ? 'text-green-600' : 'text-white'}`}>
                     {isProtocolActive ? 'Protocol Verified' : 'Execute Protocol'}
                   </h4>
-                  <p className="text-[7px] font-bold uppercase text-slate-400">Initialize Daily Behavioral Benchmarks</p>
+                  <p className={`text-[7px] font-bold uppercase ${isProtocolActive ? 'text-green-600/60' : 'text-slate-400'}`}>
+                    {isProtocolActive ? 'All benchmarks present for today' : 'Initialize Daily Behavioral Benchmarks'}
+                  </p>
                 </div>
               </div>
               {!isProtocolActive && <Zap size={16} className="text-amber-400 animate-pulse" />}
