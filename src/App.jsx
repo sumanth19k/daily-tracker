@@ -52,6 +52,16 @@ const RECURRING_TASKS = [
 ];
 
 const App = () => {
+  // CSS Injection to ensure Tailwind works in all environments
+  useEffect(() => {
+    if (!document.getElementById('tailwind-cdn')) {
+      const script = document.createElement('script');
+      script.id = 'tailwind-cdn';
+      script.src = 'https://cdn.tailwindcss.com';
+      document.head.appendChild(script);
+    }
+  }, []);
+
   const getLocalDateString = (dateObj = new Date()) => {
     const year = dateObj.getFullYear();
     const month = String(dateObj.getMonth() + 1).padStart(2, '0');
@@ -124,7 +134,7 @@ const App = () => {
       return;
     }
 
-    const systemPrompt = "You are 'Friday', a military-grade AI strategist. Tone: Cold, elite, ultra-efficient. 50 words max.";
+    const systemPrompt = "You are 'Friday', a military-grade AI strategist for a high-performing scholar. Tone: Cold, elite, ultra-efficient. 50 words max.";
     const prompt = `Pending Quests: [${pendingTasks}]. Deliver high-intensity tactical briefing.`;
     callGemini(prompt, systemPrompt);
   };
@@ -144,7 +154,6 @@ const App = () => {
             const uniqueKey = `${t.id}-${dateKey}`;
             const normalizedTask = { ...t, date: dateKey };
             
-            // Fixed Normalization: Removed "daily habits" string check
             const nameLower = (t.name || "").toLowerCase();
             const catLower = (t.category || "").toLowerCase();
             if (catLower === 'behavioral' || nameLower.includes("nf") || nameLower.includes("sugar") || nameLower.includes("wake up")) {
@@ -274,7 +283,15 @@ const App = () => {
       return { date: ds, intensity: Math.min(count, 4) };
     });
 
-    return { currentLevel, progressXP, streak, last30 };
+    // Level-based titles for motivation
+    let rank = "INITIATE RECRUIT";
+    if (currentLevel === 2) rank = "DISCIPLINED OPERATIVE";
+    if (currentLevel === 3) rank = "VANGUARD AGENT";
+    if (currentLevel === 4) rank = "SPECIALIST OPERATOR";
+    if (currentLevel >= 5) rank = "ELITE WARRIOR";
+    if (currentLevel >= 10) rank = "SUPREME COMMANDER";
+
+    return { currentLevel, progressXP, streak, last30, rank };
   }, [tasks, points]);
 
   if (loading && tasks.length === 0) return (
@@ -304,7 +321,7 @@ const App = () => {
             <h1 className="text-2xl font-black tracking-tighter text-blue-400 italic">FRIDAY OS</h1>
             <div className="flex items-center gap-2">
                <div className={`w-1.5 h-1.5 rounded-full ${syncing ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`} />
-               <p className="text-slate-500 text-[8px] uppercase tracking-widest font-bold">
+               <p className="text-slate-400 text-[8px] uppercase tracking-widest font-bold">
                 {isTodaySelected ? 'Live Mission' : 'History Link'}
                </p>
             </div>
@@ -484,7 +501,7 @@ const App = () => {
               <Flame className="absolute -right-8 -bottom-8 w-40 h-40 text-blue-500/10 rotate-12" />
               <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-3">Evolution Protocol</p>
               <h2 className="text-3xl font-black mb-6 italic tracking-tighter uppercase text-blue-50">
-                {stats.currentLevel < 2 ? 'Initiate Recruit' : stats.currentLevel < 5 ? 'Disciplined Commando' : 'Elite Warrior'}
+                {stats.rank}
               </h2>
               <div className="h-4 bg-white/5 rounded-full overflow-hidden p-1">
                 <div className="h-full bg-blue-500 rounded-full transition-all duration-1000" style={{ width: `${(stats.progressXP / 500) * 100}%` }} />
