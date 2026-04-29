@@ -34,7 +34,8 @@ import {
 
 // --- CONFIGURATION ---
 const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz9lJlJCUBH0q1qxfpVH09Gm17Py5b7ueAFyuKQhHWCV4SU-Wez9hO4MDRUQWwuLJURIw/exec".trim(); 
-const apiKey = "zSKFn01nBUsB71TwAUJ08O8USbtRkaQMECGphgUw"; 
+const NINJA_API_KEY = "zSKFn01nBUsB71TwAUJ08O8USbtRkaQMECGphgUw"; 
+const QUOTE_API_URL = "https://api.api-ninjas.com/v1/quotes?category=success";
 
 const SECTIONS = [
   { id: 'Fitness', icon: <Dumbbell size={14} />, color: 'text-green-500', bg: 'bg-green-500/10' },
@@ -63,7 +64,7 @@ const App = () => {
     }
   }, []);
 
-  // --- ROBUST DATE UTILITIES ---
+  // --- DATE UTILITIES (TimeZone Safe) ---
   const getLocalDateString = (dateObj = new Date()) => {
     const year = dateObj.getFullYear();
     const month = String(dateObj.getMonth() + 1).padStart(2, '0');
@@ -73,15 +74,15 @@ const App = () => {
 
   const normalizeIncomingDate = (dateVal) => {
     if (!dateVal) return "";
-    const dateStr = String(dateVal).split('T')[0].split(' ')[0]; // Extract YYYY-MM-DD
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      const parts = dateStr.split('-');
-      return `${parts[0]}-${parts[1]}-${parts[2]}`;
+    // Robust parsing for various Sheet formats (including those with time components)
+    const dateStr = String(dateVal).split('T')[0].split(' ')[0].trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+    const parts = dateStr.split(/[-/]/);
+    if (parts.length === 3) {
+      if (parts[0].length === 4) return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+      if (parts[2].length === 4) return `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
     }
-    try {
-      const d = new Date(dateVal);
-      return isNaN(d.getTime()) ? dateStr : getLocalDateString(d);
-    } catch (e) { return dateStr; }
+    return dateStr;
   };
 
   const todayStr = useMemo(() => getLocalDateString(), []);
@@ -94,13 +95,53 @@ const App = () => {
   const [newTaskName, setNewTaskName] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Fitness');
   const [points, setPoints] = useState(0);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiBriefing, setAiBriefing] = useState("");
-  
+  const [dailyQuote, setDailyQuote] = useState({ text: "Retrieving daily directive...", author: "System" });
+
   const isTodaySelected = selectedDate === todayStr;
 
+  // --- QUOTE LOGIC ---
+  const fetchDailyQuote = useCallback(async () => {
+    const cacheKey = 'friday_os_quote_v1';
+    const cached = localStorage.getItem(cacheKey);
+    
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (parsed.date === todayStr) {
+        setDailyQuote(parsed.quote);
+        return;
+      }
+    }
+
+    try {
+      const response = await fetch(QUOTE_API_URL, {
+        headers: { 'X-Api-Key': NINJA_API_KEY }
+      });
+      if (!response.ok) throw new Error("Quote API Offline");
+      const data = await response.json();
+      
+      if (data && data.length > 0) {
+        const newQuote = { text: data[0].quote, author: data[0].author };
+        setDailyQuote(newQuote);
+        localStorage.setItem(cacheKey, JSON.stringify({
+          date: todayStr,
+          quote: newQuote
+        }));
+      }
+    } catch (err) {
+      setDailyQuote({ 
+        text: "The individual who says it is not possible should move out of the way of those doing it.", 
+        author: "Tricia Cunningham" 
+      });
+    }
+  }, [todayStr]);
+
+  useEffect(() => {
+    fetchDailyQuote();
+  }, [fetchDailyQuote]);
+
   const navigateDate = (days) => {
-    const d = new Date(selectedDate + "T00:00:00");
+    const parts = selectedDate.split('-');
+    const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
     d.setDate(d.getDate() + days);
     setSelectedDate(getLocalDateString(d));
   };
@@ -144,7 +185,7 @@ const App = () => {
         setPoints(calculatePoints(uniqueList));
       }
     } catch (err) {
-      setError("Database Sync Offline - Using Local Cache");
+      setError("Sync Interrupted - Check Ledger Connection");
     } finally {
       setLoading(false);
     }
@@ -160,7 +201,7 @@ const App = () => {
         body: JSON.stringify(payload)
       });
     } catch (e) {
-      setError("CRITICAL: Save Failed. Check connection.");
+      setError("CRITICAL: Save Failed.");
     } finally {
       setSyncing(false);
     }
@@ -186,6 +227,7 @@ const App = () => {
   };
 
   const startProtocol = async () => {
+    if (!isTodaySelected) return;
     const dateTasks = tasks.filter(t => t.date === selectedDate);
     const existingNames = dateTasks.map(t => t.name.toLowerCase().trim());
     
@@ -233,13 +275,15 @@ const App = () => {
   const stats = useMemo(() => {
     const currentLevel = Math.floor(points / 500) + 1;
     const progressXP = points % 500;
-    
     const dates = new Set(tasks.filter(t => t.status === 'Completed').map(t => t.date));
     let streak = 0; let d = new Date();
-    while(dates.has(getLocalDateString(d))) { streak++; d.setDate(d.getDate()-1); }
+    d.setHours(12, 0, 0, 0); 
+    while(dates.has(getLocalDateString(d))) { streak++; d.setDate(d.getDate() - 1); }
 
     const last30 = Array.from({length: 30}, (_, i) => {
-      const day = new Date(); day.setDate(day.getDate() - (29-i));
+      const day = new Date();
+      day.setHours(12, 0, 0, 0);
+      day.setDate(day.getDate() - (29-i));
       const ds = getLocalDateString(day);
       const count = tasks.filter(t => t.date === ds && t.status === 'Completed').length;
       return { date: ds, intensity: Math.min(count, 4) };
@@ -302,7 +346,6 @@ const App = () => {
           </div>
         </div>
 
-        {/* Date Controller */}
         <div className="bg-white/5 rounded-2xl p-1.5 flex items-center justify-between border border-white/10 mb-2">
           <button onClick={() => navigateDate(-1)} className="p-2 hover:bg-white/10 rounded-xl transition-all active:scale-90"><ChevronLeft size={22} className="text-blue-400" /></button>
           <div className="flex items-center gap-2" onClick={() => setSelectedDate(todayStr)}>
@@ -313,33 +356,53 @@ const App = () => {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-8">
+      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-8 no-scrollbar">
         {view === 'daily' && (
           <>
-            <button 
-              onClick={startProtocol}
-              disabled={isProtocolActive || syncing}
-              className={`w-full p-5 rounded-[2.5rem] flex items-center justify-between shadow-xl transition-all border-2 ${
-                isProtocolActive 
-                ? 'bg-green-500/10 border-green-500/20 cursor-default' 
-                : 'bg-slate-900 border-blue-500/30 text-white active:scale-95'
-              }`}
-            >
-              <div className="flex items-center gap-4">
-                <div className={`${isProtocolActive ? 'bg-green-500' : 'bg-blue-600'} p-3 rounded-2xl shadow-lg`}>
-                  {isProtocolActive ? <ShieldCheck size={20} className="text-white" /> : <Power size={20} className="text-white" />}
-                </div>
-                <div className="text-left">
-                  <h4 className={`text-[11px] font-black uppercase tracking-widest ${isProtocolActive ? 'text-green-600' : 'text-white'}`}>
-                    {isProtocolActive ? 'Protocol Verified' : 'Execute Protocol'}
-                  </h4>
-                  <p className={`text-[7px] font-bold uppercase ${isProtocolActive ? 'text-green-600/60' : 'text-slate-400'}`}>
-                    {isProtocolActive ? 'All benchmarks present for today' : 'Initialize Daily Behavioral Benchmarks'}
-                  </p>
-                </div>
+            {/* Daily Directive (Tactical Quote) */}
+            <div className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm relative overflow-hidden group">
+              <div className="absolute top-0 right-0 p-4 opacity-5">
+                <Quote size={60} className="text-slate-900" />
               </div>
-              {!isProtocolActive && <Zap size={16} className="text-amber-400 animate-pulse" />}
-            </button>
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <Sparkles size={14} className="text-amber-500" />
+                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Tactical Directive</span>
+                </div>
+                <p className="text-sm font-bold text-slate-800 leading-relaxed italic tracking-tight">"{dailyQuote.text}"</p>
+                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-4 text-right">— {dailyQuote.author}</p>
+              </div>
+            </div>
+
+            {/* Protocol Execute Button (HIDDEN IF ACTIVE, FROZEN IF PAST/FUTURE) */}
+            {!isProtocolActive ? (
+              <button 
+                onClick={startProtocol}
+                disabled={syncing || !isTodaySelected}
+                className={`w-full p-5 rounded-[2.5rem] flex items-center justify-between shadow-xl transition-all border-2 ${
+                  !isTodaySelected
+                    ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed grayscale'
+                    : 'bg-slate-900 border-blue-500/30 text-white active:scale-95'
+                }`}
+              >
+                <div className="flex items-center gap-4">
+                  <div className={`${!isTodaySelected ? 'bg-slate-300' : 'bg-blue-600'} p-3 rounded-2xl shadow-lg`}>
+                    {!isTodaySelected ? <Lock size={20} className="text-white" /> : <Power size={20} className="text-white" />}
+                  </div>
+                  <div className="text-left">
+                    <h4 className={`text-[11px] font-black uppercase tracking-widest ${!isTodaySelected ? 'text-slate-400' : 'text-white'}`}>
+                      {!isTodaySelected ? 'Protocol Frozen' : 'Execute Protocol'}
+                    </h4>
+                    <p className={`text-[7px] font-bold uppercase text-slate-400`}>
+                      {!isTodaySelected 
+                          ? 'Archival restricted mission cycle' 
+                          : 'Initialize daily behavioral benchmarks'}
+                    </p>
+                  </div>
+                </div>
+                {isTodaySelected && <Zap size={16} className="text-amber-400 animate-pulse" />}
+              </button>
+            ) : null}
 
             {!isTodaySelected && (
               <div className="bg-amber-500/10 border-2 border-dashed border-amber-500/20 p-4 rounded-[2.2rem] flex items-center gap-4">
@@ -485,6 +548,11 @@ const App = () => {
           <span className="text-[8px] font-black uppercase mt-1.5 tracking-widest">Stats</span>
         </button>
       </div>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      `}} />
     </div>
   );
 };
